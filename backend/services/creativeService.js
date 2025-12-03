@@ -98,8 +98,8 @@ async function generateCreatives(logoPath, productPath, brandName = null, produc
       console.log(`Generating creative ${i + 1}/${NUM_VARIATIONS}...`);
       
       try {
-        // Generate image variation using FLUX with product image as base
-        const imagePrompt = generateImagePrompt(i, brandContext);
+        // Generate creative, marketing-ready image prompt using Gemini
+        const imagePrompt = await generateCreativeImagePromptWithGemini(i, brandContext, productBuffer);
         const imageBuffer = await generateImage(imagePrompt, productBuffer);
         
         // Generate caption with brand context
@@ -279,7 +279,89 @@ async function analyzeImagesWithVision(logoBuffer, productBuffer) {
 }
 
 /**
- * Generate image prompt for variation
+ * Generate creative, marketing-ready image prompt using Gemini based on product/brand analysis
+ * Creates contextual, visually stunning prompts like "Pepsi bottle on a beach with waves"
+ */
+async function generateCreativeImagePromptWithGemini(variationIndex, brandContext, productBuffer) {
+  try {
+    if (!geminiAI || !brandContext) {
+      // Fallback to basic prompt if Gemini not available
+      return generateImagePrompt(variationIndex, brandContext);
+    }
+    
+    console.log(`Generating creative image prompt ${variationIndex + 1} with Gemini...`);
+    
+    const model = geminiAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    
+    // Convert product buffer to base64
+    const productBase64 = productBuffer.toString('base64');
+    
+    // Define creative scenarios/styles for variations
+    const creativeScenarios = [
+      'a beautiful beach scene with ocean waves',
+      'a modern urban cityscape at sunset',
+      'a cozy home setting with natural lighting',
+      'an outdoor adventure scene in nature',
+      'a vibrant party or celebration atmosphere',
+      'a serene mountain landscape',
+      'a trendy cafe or restaurant setting',
+      'a sports or athletic environment',
+      'a luxurious lifestyle setting',
+      'a minimalist studio with dramatic lighting',
+      'a tropical paradise setting',
+      'a contemporary workspace or office'
+    ];
+    
+    const scenario = creativeScenarios[variationIndex % creativeScenarios.length];
+    
+    const prompt = `Analyze this product image and create a detailed, marketing-ready image generation prompt for a social media ad creative.
+
+Product: ${brandContext.description || 'the product'}
+Brand: ${brandContext.brand || 'the brand'}
+
+Create a prompt that describes a visually stunning, marketing-ready scene where this product is featured prominently. The scene should be: ${scenario}
+
+The prompt should:
+- Describe a complete, visually appealing scene (not just the product)
+- Include the product naturally integrated into the scene
+- Include the brand logo prominently but naturally
+- Be suitable for professional marketing/advertising
+- Create an image that would work well on Instagram, Facebook, and Twitter
+- Be specific about lighting, composition, and mood
+- Make it feel authentic and aspirational
+
+Return ONLY the image generation prompt, nothing else. Make it detailed and specific.`;
+    
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: productBase64,
+          mimeType: 'image/jpeg'
+        }
+      },
+      prompt
+    ]);
+    
+    const response = await result.response;
+    let creativePrompt = response.text().trim();
+    
+    // Clean up the prompt
+    creativePrompt = creativePrompt
+      .replace(/^["']|["']$/g, '')
+      .replace(/\n+/g, ' ')
+      .trim();
+    
+    console.log(`✓ Creative prompt generated: ${creativePrompt.substring(0, 100)}...`);
+    
+    return creativePrompt;
+  } catch (error) {
+    console.warn('Gemini creative prompt generation failed, using fallback:', error.message);
+    return generateImagePrompt(variationIndex, brandContext);
+  }
+}
+
+/**
+ * Generate image prompt for variation (fallback function)
  */
 function generateImagePrompt(variationIndex, brandContext = null) {
   const styles = [
@@ -654,7 +736,7 @@ async function generateCaption(imagePrompt, variationIndex, brandContext = null)
     
     const userPrompt = `${contextInfo}Based on this ad creative description: "${imagePrompt}"
 
-Create a compelling social media ad caption (2-3 sentences) specifically for ${brandContext && brandContext.description ? brandContext.description : 'this product'} that:
+Create ONE compelling social media ad caption (2-3 sentences) specifically for ${brandContext && brandContext.description ? brandContext.description : 'this product'} that:
 - Is engaging and attention-grabbing
 - Includes a clear call-to-action
 - Is suitable for platforms like Instagram, Facebook, and Twitter
@@ -665,7 +747,7 @@ Create a compelling social media ad caption (2-3 sentences) specifically for ${b
 
 Variation style: ${variationStyle}
 
-Make sure to use the actual brand and product names in the caption, not generic placeholders.`;
+IMPORTANT: Return ONLY ONE caption. Do not provide multiple options or numbered lists. Just return the single best caption directly.`;
 
     const response = await axios.post(
       'https://router.huggingface.co/v1/chat/completions',
@@ -694,12 +776,27 @@ Make sure to use the actual brand and product names in the caption, not generic 
 
     let caption = response.data.choices[0].message.content.trim();
     
-    // Clean up the caption
+    // Clean up the caption - remove numbered lists, options, etc.
     caption = caption
+      .replace(/^Here are.*?:/i, '')
+      .replace(/^\d+\.\s*/gm, '') // Remove numbered list items
+      .replace(/^Option \d+:/i, '')
+      .replace(/^"\s*/g, '') // Remove leading quotes
+      .replace(/\s*"$/g, '') // Remove trailing quotes
       .replace(/\[.*?\]/g, '')
       .replace(/\(.*?\)/g, '')
       .replace(/\n+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim();
+    
+    // If caption still contains multiple options, extract just the first one
+    const firstCaptionMatch = caption.match(/^([^0-9]+?)(?:\d+\.|Option|$)/);
+    if (firstCaptionMatch) {
+      caption = firstCaptionMatch[1].trim();
+    }
+    
+    // Remove any remaining quotes
+    caption = caption.replace(/^["']|["']$/g, '').trim();
 
     return caption || 'Discover our amazing product today!';
   } catch (error) {
