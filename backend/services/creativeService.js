@@ -8,13 +8,40 @@ const archiver = require('archiver');
 const sharp = require('sharp');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// Initialize HuggingFace API Key
+// Initialize HuggingFace API Keys (using multiple keys for rate limiting)
 // Using direct router endpoint calls instead of InferenceClient to avoid deprecated endpoint issues
-const HF_API_KEY = process.env.HF_API_KEY || '';
-if (!HF_API_KEY) {
-  console.warn('Warning: HF_API_KEY not found in environment variables');
+const HF_API_KEY1 = process.env.HF_API_KEY1 || '';
+const HF_API_KEY2 = process.env.HF_API_KEY2 || '';
+const HF_API_KEY3 = process.env.HF_API_KEY3 || '';
+
+// Fallback to single key if multiple keys not provided
+const HF_API_KEY = process.env.HF_API_KEY || HF_API_KEY1 || '';
+
+if (!HF_API_KEY1 && !HF_API_KEY2 && !HF_API_KEY3 && !HF_API_KEY) {
+  console.warn('Warning: No HF_API_KEY found in environment variables');
 } else {
-  console.log('✓ HF_API_KEY loaded');
+  if (HF_API_KEY1) console.log('✓ HF_API_KEY1 loaded');
+  if (HF_API_KEY2) console.log('✓ HF_API_KEY2 loaded');
+  if (HF_API_KEY3) console.log('✓ HF_API_KEY3 loaded');
+  if (!HF_API_KEY1 && !HF_API_KEY2 && !HF_API_KEY3 && HF_API_KEY) {
+    console.log('✓ HF_API_KEY loaded (single key mode)');
+  }
+}
+
+/**
+ * Get the appropriate API key based on variation index
+ * Key 1: variations 0-3 (first 4)
+ * Key 2: variations 4-6 (next 3)
+ * Key 3: variations 7-9 (last 3)
+ */
+function getApiKeyForVariation(variationIndex) {
+  if (variationIndex < 4) {
+    return HF_API_KEY1 || HF_API_KEY;
+  } else if (variationIndex < 7) {
+    return HF_API_KEY2 || HF_API_KEY;
+  } else {
+    return HF_API_KEY3 || HF_API_KEY;
+  }
 }
 
 // Initialize Gemini API
@@ -51,7 +78,7 @@ if (GEMINI_API_KEY) {
 // ============================================================================
 
 // Number of variations to generate
-const NUM_VARIATIONS = 1; // Testing with 1, change back to 12 for production
+const NUM_VARIATIONS = 10; // Generate 10 variations per upload
 
 /**
  * Generate ad creative variations from logo and product images
@@ -98,9 +125,13 @@ async function generateCreatives(logoPath, productPath, brandName = null, produc
       console.log(`Generating creative ${i + 1}/${NUM_VARIATIONS}...`);
       
       try {
+        // Get the appropriate API key for this variation
+        const apiKey = getApiKeyForVariation(i);
+        console.log(`Using API key ${i < 4 ? '1' : i < 7 ? '2' : '3'} for variation ${i + 1}`);
+        
         // Generate creative, marketing-ready image prompt using Gemini
         const imagePrompt = await generateCreativeImagePromptWithGemini(i, brandContext, productBuffer);
-        const imageBuffer = await generateImage(imagePrompt, productBuffer);
+        const imageBuffer = await generateImage(imagePrompt, productBuffer, apiKey);
         
         // Generate caption with brand context
         const caption = await generateCaption(imagePrompt, i, brandContext);
@@ -423,7 +454,7 @@ function generateImagePrompt(variationIndex, brandContext = null) {
  * 2. Use a different provider/model that's free
  * 3. Set up your own Inference Endpoint
  */
-async function generateImage(prompt, productBuffer = null) {
+async function generateImage(prompt, productBuffer = null, apiKey = null) {
   try {
     console.log('Generating image with HuggingFace Router API...');
     
@@ -431,8 +462,11 @@ async function generateImage(prompt, productBuffer = null) {
       throw new Error('Product image is required for image generation');
     }
     
+    // Use provided API key or fallback to default
+    const keyToUse = apiKey || HF_API_KEY;
+    
     // Use imageToImage to edit the product image with the prompt
-    const imageBuffer = await generateImageViaRouterImageToImage(prompt, productBuffer);
+    const imageBuffer = await generateImageViaRouterImageToImage(prompt, productBuffer, keyToUse);
     console.log('✓ Image generated using imageToImage with FLUX.2-dev');
     
     return imageBuffer;
@@ -455,8 +489,13 @@ async function generateImage(prompt, productBuffer = null) {
 /**
  * Generate image using wavespeed provider via router endpoint for imageToImage
  * Uses direct router endpoint: https://router.huggingface.co/wavespeed/api/v3/wavespeed-ai/flux-2-dev/edit
+ * @param {string} prompt - Image generation prompt
+ * @param {Buffer} imageBuffer - Input product image buffer
+ * @param {string} apiKey - HuggingFace API key to use
  */
-async function generateImageViaRouterImageToImage(prompt, imageBuffer) {
+async function generateImageViaRouterImageToImage(prompt, imageBuffer, apiKey = null) {
+  const keyToUse = apiKey || HF_API_KEY;
+  
   try {
     console.log('Using wavespeed router endpoint for imageToImage (FLUX.2-dev)...');
     
@@ -473,13 +512,13 @@ async function generateImageViaRouterImageToImage(prompt, imageBuffer) {
       {
         images: [imageDataUri], // API expects images as an array
         prompt: prompt,
-        parameters: {
+      parameters: {
           negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy"
         }
       },
       {
         headers: {
-          'Authorization': `Bearer ${HF_API_KEY}`,
+          'Authorization': `Bearer ${keyToUse}`,
           'Content-Type': 'application/json'
         }
       }
@@ -507,7 +546,7 @@ async function generateImageViaRouterImageToImage(prompt, imageBuffer) {
           // Poll using router endpoint with HuggingFace token
           const resultResponse = await axios.get(pollUrl, {
             headers: {
-              'Authorization': `Bearer ${HF_API_KEY}`
+              'Authorization': `Bearer ${keyToUse}`
             }
           });
           
