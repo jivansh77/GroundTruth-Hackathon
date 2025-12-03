@@ -7,6 +7,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@huggingface/inference": "^2.8.1",
     "archiver": "^7.0.1",
     "axios": "^1.9.0",
@@ -20,4 +21,3 @@
     "nodemon": "^3.0.1"
   }
 }
-

@@ -53,11 +53,15 @@ app.post('/api/generate-creatives', upload.fields([
 
     const logoPath = req.files.logo[0].path;
     const productPath = req.files.product[0].path;
+    
+    // Optional: brand and product names from request body (fallback if vision analysis fails)
+    const brandName = req.body.brandName || null;
+    const productName = req.body.productName || null;
 
-    console.log('Generating creatives for:', { logoPath, productPath });
+    console.log('Generating creatives for:', { logoPath, productPath, brandName, productName });
 
     // Generate creatives (images + captions)
-    const zipBuffer = await generateCreatives(logoPath, productPath);
+    const zipBuffer = await generateCreatives(logoPath, productPath, brandName, productName);
 
     // Clean up uploaded files
     fs.unlinkSync(logoPath);

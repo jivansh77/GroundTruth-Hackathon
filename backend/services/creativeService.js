@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
 const sharp = require('sharp');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // Initialize HuggingFace API Key
 // Using direct router endpoint calls instead of InferenceClient to avoid deprecated endpoint issues
@@ -14,6 +15,16 @@ if (!HF_API_KEY) {
   console.warn('Warning: HF_API_KEY not found in environment variables');
 } else {
   console.log('✓ HF_API_KEY loaded');
+}
+
+// Initialize Gemini API
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+let geminiAI = null;
+if (GEMINI_API_KEY) {
+  geminiAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  console.log('✓ GEMINI_API_KEY loaded');
+} else {
+  console.warn('Warning: GEMINI_API_KEY not found in environment variables');
 }
 
 // ============================================================================
@@ -44,8 +55,12 @@ const NUM_VARIATIONS = 1; // Testing with 1, change back to 12 for production
 
 /**
  * Generate ad creative variations from logo and product images
+ * @param {string} logoPath - Path to logo image
+ * @param {string} productPath - Path to product image
+ * @param {string} [brandName] - Optional brand name (fallback if vision analysis fails)
+ * @param {string} [productName] - Optional product name (fallback if vision analysis fails)
  */
-async function generateCreatives(logoPath, productPath) {
+async function generateCreatives(logoPath, productPath, brandName = null, productName = null) {
   const tempDir = path.join(__dirname, '..', 'temp_generations');
   
   // Create temp directory
@@ -58,6 +73,24 @@ async function generateCreatives(logoPath, productPath) {
     const logoBuffer = fs.readFileSync(logoPath);
     const productBuffer = fs.readFileSync(productPath);
 
+    // Analyze images with vision model to extract brand/product info
+    let brandContext = await analyzeImagesWithVision(logoBuffer, productBuffer);
+    
+    // Use user-provided names if vision analysis didn't find clear results
+    if ((!brandContext.brand || brandContext.brand === 'the brand') && brandName) {
+      brandContext.brand = brandName;
+    }
+    if ((!brandContext.product || brandContext.product === 'the product') && productName) {
+      brandContext.product = productName;
+    }
+    
+    // Update description if we have better info
+    if (brandContext.brand !== 'the brand' && brandContext.product !== 'the product') {
+      brandContext.description = `${brandContext.brand} ${brandContext.product}`;
+    }
+    
+    console.log(`Using brand context: ${brandContext.description}`);
+
     // Generate variations
     const creatives = [];
     
@@ -66,11 +99,11 @@ async function generateCreatives(logoPath, productPath) {
       
       try {
         // Generate image variation using FLUX with product image as base
-        const imagePrompt = generateImagePrompt(i);
+        const imagePrompt = generateImagePrompt(i, brandContext);
         const imageBuffer = await generateImage(imagePrompt, productBuffer);
         
-        // Generate caption
-        const caption = await generateCaption(imagePrompt, i);
+        // Generate caption with brand context
+        const caption = await generateCaption(imagePrompt, i, brandContext);
         
         // Save image
         const imageFilename = `creative-${i + 1}.jpg`;
@@ -131,9 +164,124 @@ async function generateCreatives(logoPath, productPath) {
 }
 
 /**
+ * Analyze images using Gemini 2.0 Flash to extract brand and product information
+ * Uses Google Gemini 2.0 Flash model to identify brand name, product type, and key details
+ */
+async function analyzeImagesWithVision(logoBuffer, productBuffer) {
+  try {
+    console.log('Analyzing images with Gemini 2.0 Flash to extract brand/product info...');
+    
+    if (!geminiAI) {
+      console.warn('Gemini API not initialized, using fallback');
+      return {
+        brand: 'the brand',
+        product: 'the product',
+        description: 'a product'
+      };
+    }
+    
+    // Get the Gemini 2.0 Flash model
+    const model = geminiAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    
+    // Convert buffers to base64
+    const logoBase64 = logoBuffer.toString('base64');
+    const productBase64 = productBuffer.toString('base64');
+    
+    // Analyze logo image
+    const logoPrompt = "What brand or company name is shown in this logo? Extract the exact brand name. If you see text, provide it exactly as shown. Only return the brand name, nothing else.";
+    
+    const logoResult = await model.generateContent([
+      {
+        inlineData: {
+          data: logoBase64,
+          mimeType: 'image/jpeg'
+        }
+      },
+      logoPrompt
+    ]);
+    
+    const logoResponse = await logoResult.response;
+    const logoText = logoResponse.text().trim();
+    
+    // Analyze product image
+    const productPrompt = "What product is shown in this image? Describe the product type, brand name if visible, and key features. Be specific about the product name and type. Format: 'Brand Name - Product Type' or just 'Product Type' if no brand is visible.";
+    
+    const productResult = await model.generateContent([
+      {
+        inlineData: {
+          data: productBase64,
+          mimeType: 'image/jpeg'
+        }
+      },
+      productPrompt
+    ]);
+    
+    const productResponse = await productResult.response;
+    const productText = productResponse.text().trim();
+    
+    // Extract brand name from logo analysis
+    let brand = logoText;
+    // Clean up brand name
+    brand = brand.replace(/[^a-zA-Z0-9\s]/g, '').trim();
+    
+    // Extract brand and product from product analysis
+    let product = productText;
+    
+    // Try to extract brand from product description if not found in logo
+    if (!brand || brand.length < 2 || brand.toLowerCase() === 'unknown' || brand.toLowerCase().includes('cannot')) {
+      // Look for pattern like "Brand - Product" or "Brand Product"
+      const brandProductMatch = productText.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[-–]\s*(.+)/);
+      if (brandProductMatch) {
+        brand = brandProductMatch[1].trim();
+        product = brandProductMatch[2].trim();
+      } else {
+        // Try to find capitalized words at the start
+        const brandMatch = productText.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/);
+        if (brandMatch) {
+          brand = brandMatch[1].trim();
+          product = productText.replace(new RegExp(brand, 'gi'), '').trim();
+        }
+      }
+    } else {
+      // Remove brand from product description if found
+      product = product.replace(new RegExp(brand, 'gi'), '').trim();
+    }
+    
+    // Clean up extracted text
+    brand = brand.replace(/[^a-zA-Z0-9\s]/g, '').trim();
+    product = product.replace(/^[^a-zA-Z0-9]*/, '').replace(/[^a-zA-Z0-9\s]*$/, '').trim();
+    
+    // If still no brand, use generic
+    if (!brand || brand.length < 2 || brand.toLowerCase() === 'unknown') {
+      brand = 'the brand';
+    }
+    
+    // If no product, use generic
+    if (!product || product.length < 2) {
+      product = 'the product';
+    }
+    
+    console.log(`✓ Vision analysis complete - Brand: "${brand}", Product: "${product}"`);
+    
+    return {
+      brand: brand,
+      product: product,
+      description: `${brand} ${product}`.trim()
+    };
+  } catch (error) {
+    console.error('Error in vision analysis:', error.message);
+    return {
+      brand: 'the brand',
+      product: 'the product',
+      description: 'a product'
+    };
+  }
+}
+
+/**
  * Generate image prompt for variation
  */
-function generateImagePrompt(variationIndex) {
+function generateImagePrompt(variationIndex, brandContext = null) {
   const styles = [
     'modern minimalist design with clean lines and white space',
     'vibrant and colorful with bold typography and dynamic layouts',
@@ -167,7 +315,19 @@ function generateImagePrompt(variationIndex) {
   const style = styles[variationIndex % styles.length];
   const composition = compositions[variationIndex % compositions.length];
   
-  return `Create an engaging ad creative featuring a brand logo and product image. Style: ${style}. Composition: ${composition}. The design should be professional, eye-catching, and suitable for social media advertising. Include the product prominently while maintaining brand identity. High quality, commercial photography style, well-lit, professional composition, no text overlays, clean design.`;
+  // Determine logo location based on composition
+  let logoLocation = 'top corner';
+  if (composition.includes('left')) logoLocation = 'left side';
+  if (composition.includes('right')) logoLocation = 'right side';
+  if (composition.includes('top')) logoLocation = 'top';
+  if (composition.includes('bottom') || composition.includes('footer')) logoLocation = 'bottom';
+  if (composition.includes('watermark')) logoLocation = 'as a subtle watermark overlay';
+  if (composition.includes('integrated') || composition.includes('seamlessly')) logoLocation = 'integrated naturally into the design';
+  
+  // Build context-aware prompt
+  const brandContextStr = brandContext ? `for ${brandContext.brand} ${brandContext.product}` : '';
+  
+  return `Transform this product image into a ${style} social media ad creative. Apply ${composition} layout. Integrate the brand logo prominently at ${logoLocation}. The final image should be a complete, professional ad creative ready for social media ${brandContextStr}, with the product and logo combined in a visually appealing ${style} design. Maintain product visibility and authenticity while incorporating the logo naturally. Create a cohesive composition that works as a standalone ad creative. High quality, commercial photography style, well-lit, professional composition, no text overlays, clean design suitable for Instagram, Facebook, and Twitter.`;
 }
 
 /**
@@ -471,21 +631,41 @@ async function generateImageViaRouterTextToImage(prompt) {
 
 /**
  * Generate caption using HuggingFace LLM
+ * @param {string} imagePrompt - The image generation prompt
+ * @param {number} variationIndex - Index of the variation
+ * @param {Object} brandContext - Brand and product context from vision analysis
  */
-async function generateCaption(imagePrompt, variationIndex) {
+async function generateCaption(imagePrompt, variationIndex, brandContext = null) {
   try {
     const systemPrompt = "You are a professional copywriter specializing in social media advertising. Create engaging, compelling ad captions that drive action.";
     
-    const userPrompt = `Based on this ad creative description: "${imagePrompt}"
+    // Build context-aware prompt
+    let contextInfo = '';
+    if (brandContext && brandContext.brand && brandContext.brand !== 'the brand') {
+      contextInfo = `The brand is ${brandContext.brand}. `;
+    }
+    if (brandContext && brandContext.product && brandContext.product !== 'the product') {
+      contextInfo += `The product is ${brandContext.product}. `;
+    }
+    
+    const variationStyle = variationIndex % 3 === 0 ? 'Direct and action-oriented' : 
+                          variationIndex % 3 === 1 ? 'Emotional and storytelling' : 
+                          'Benefit-focused and value-driven';
+    
+    const userPrompt = `${contextInfo}Based on this ad creative description: "${imagePrompt}"
 
-Create a compelling social media ad caption (2-3 sentences) that:
+Create a compelling social media ad caption (2-3 sentences) specifically for ${brandContext && brandContext.description ? brandContext.description : 'this product'} that:
 - Is engaging and attention-grabbing
 - Includes a clear call-to-action
 - Is suitable for platforms like Instagram, Facebook, and Twitter
 - Is professional but conversational
 - Encourages clicks and engagement
+- References the actual brand and product name when provided
+- Highlights key features or benefits
 
-Variation style: ${variationIndex % 3 === 0 ? 'Direct and action-oriented' : variationIndex % 3 === 1 ? 'Emotional and storytelling' : 'Benefit-focused and value-driven'}`;
+Variation style: ${variationStyle}
+
+Make sure to use the actual brand and product names in the caption, not generic placeholders.`;
 
     const response = await axios.post(
       'https://router.huggingface.co/v1/chat/completions',
