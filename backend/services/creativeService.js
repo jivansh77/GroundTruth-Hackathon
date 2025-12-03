@@ -1,27 +1,20 @@
 // Load environment variables
 require('dotenv').config();
 
-const { HfInference } = require('@huggingface/inference');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
 const sharp = require('sharp');
 
-// Initialize HuggingFace Inference Client
-// Note: The package exports HfInference (not InferenceClient in CommonJS)
+// Initialize HuggingFace API Key
+// Using direct router endpoint calls instead of InferenceClient to avoid deprecated endpoint issues
 const HF_API_KEY = process.env.HF_API_KEY || '';
 if (!HF_API_KEY) {
   console.warn('Warning: HF_API_KEY not found in environment variables');
 } else {
   console.log('✓ HF_API_KEY loaded');
 }
-
-// Initialize client with router endpoint to avoid deprecated endpoint
-// The client should automatically use router when provider is specified
-const client = new HfInference(HF_API_KEY, {
-  baseUrl: 'https://router.huggingface.co'
-});
 
 // ============================================================================
 // GEMINI CODE (COMMENTED OUT - REQUIRES PAID PLAN)
@@ -178,75 +171,29 @@ function generateImagePrompt(variationIndex) {
 }
 
 /**
- * Generate image using HuggingFace InferenceClient
+ * Generate image using HuggingFace Router API directly
  * Uses textToImage for generation, or imageToImage if product image is provided
+ * Uses direct router endpoint to avoid deprecated API issues
+ * 
+ * Note: wavespeed provider may require payment/credits (402 error). 
+ * If you get a 402 error, you may need to:
+ * 1. Add credits to your HuggingFace account
+ * 2. Use a different provider/model that's free
+ * 3. Set up your own Inference Endpoint
  */
 async function generateImage(prompt, productBuffer = null) {
   try {
-    console.log('Generating image with HuggingFace InferenceClient...');
+    console.log('Generating image with HuggingFace Router API...');
     
-    let imageBlob;
+    if (!productBuffer) {
+      throw new Error('Product image is required for image generation');
+    }
     
-    if (productBuffer) {
-      // Use imageToImage to edit the product image with the prompt
-      // HfInference accepts Buffer directly, but let's try both formats
-      try {
-        // Use imageToImage with Qwen model via fal-ai provider
-        // The client should handle the Buffer/Blob conversion
-        // If it needs a Blob, we'll create one
-        let imageInput = productBuffer;
-        
-        // Check if we need to convert to Blob (Node.js 18+ has Blob)
-        if (typeof Blob !== 'undefined') {
-          try {
-            imageBlob = await client.imageToImage({
-              provider: "fal-ai",
-              model: "Qwen/Qwen-Image-Edit",
-              inputs: productBuffer, // Try Buffer first
-              parameters: { 
-                prompt: prompt,
-                negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy"
-              }
-            });
-            console.log('✓ Image generated using imageToImage with Qwen model');
-          } catch (blobError) {
-            // If Buffer fails, try with Blob
-            const productBlob = new Blob([productBuffer], { type: 'image/jpeg' });
-            imageBlob = await client.imageToImage({
-              provider: "fal-ai",
-              model: "Qwen/Qwen-Image-Edit",
-              inputs: productBlob,
-              parameters: { 
-                prompt: prompt,
-                negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy"
-              }
-            });
-            console.log('✓ Image generated using imageToImage with Qwen model (Blob format)');
-          }
-        } else {
-          // Fallback if Blob is not available
-          throw new Error('Blob not available in this Node.js version');
-        }
-      } catch (imageEditError) {
-        console.log('imageToImage failed, falling back to textToImage:', imageEditError.message);
-        // Fallback to text-to-image if image editing fails
-        imageBlob = await generateImageViaRouter(prompt);
-      }
-    } else {
-      // Use router endpoint directly since HfInference uses deprecated endpoint
-      imageBlob = await generateImageViaRouter(prompt);
-    }
-
-    // Convert blob to buffer
-    // Handle both Blob objects and Buffer objects
-    if (Buffer.isBuffer(imageBlob)) {
-      return imageBlob;
-    } else if (imageBlob && typeof imageBlob.arrayBuffer === 'function') {
-      const arrayBuffer = await imageBlob.arrayBuffer();
-      return Buffer.from(arrayBuffer);
-    } else {
-      throw new Error('Unexpected image format returned');
-    }
+    // Use imageToImage to edit the product image with the prompt
+    const imageBuffer = await generateImageViaRouterImageToImage(prompt, productBuffer);
+    console.log('✓ Image generated using imageToImage with FLUX.2-dev');
+    
+    return imageBuffer;
   } catch (error) {
     console.error('Error generating image:', error);
     
@@ -255,96 +202,196 @@ async function generateImage(prompt, productBuffer = null) {
       throw new Error('HuggingFace API quota exceeded. Please check your API key limits.');
     }
     
+    if (error.response?.status === 402 || (error.message && error.message.includes('402'))) {
+      throw new Error('Payment required: The wavespeed provider requires credits. Please add credits to your HuggingFace account at https://huggingface.co/settings/billing, or use a free alternative model.');
+    }
+    
     throw new Error(`Image generation failed: ${error.message}`);
   }
 }
 
 /**
- * Generate image using fal-ai provider via router
- * According to fal-ai docs: https://huggingface.co/docs/inference-providers/en/providers/fal-ai
- * FLUX.1-dev requires GPU, so use fal-ai provider
- * The client should use router endpoint when baseUrl is set
+ * Generate image using wavespeed provider via router endpoint for imageToImage
+ * Uses direct router endpoint: https://router.huggingface.co/wavespeed/api/v3/wavespeed-ai/flux-2-dev/edit
  */
-async function generateImageViaRouter(prompt) {
+async function generateImageViaRouterImageToImage(prompt, imageBuffer) {
   try {
-    console.log('Using fal-ai provider for textToImage (FLUX requires GPU)...');
+    console.log('Using wavespeed router endpoint for imageToImage (FLUX.2-dev)...');
     
-    // Use HfInference client with fal-ai provider for FLUX
-    // fal-ai provider supports GPU models like FLUX
-    // The client should use router endpoint when configured
-    const imageBlob = await client.textToImage({
-      provider: "fal-ai",
-      model: "black-forest-labs/FLUX.1-dev",
-      inputs: prompt,
-      parameters: {
-        negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy",
-        guidance_scale: 7.5,
-        num_inference_steps: 30
+    // Convert buffer to base64
+    const imageBase64 = imageBuffer.toString('base64');
+    // Determine image type from buffer (default to jpeg, but could be png/webp)
+    const imageType = 'jpeg'; // You could detect this from the buffer if needed
+    const imageDataUri = `data:image/${imageType};base64,${imageBase64}`;
+    
+    // Use wavespeed endpoint - API expects "images" field (array) instead of "inputs"
+    // Based on error: "property 'images' is missing"
+    const response = await axios.post(
+      'https://router.huggingface.co/wavespeed/api/v3/wavespeed-ai/flux-2-dev/edit',
+      {
+        images: [imageDataUri], // API expects images as an array
+        prompt: prompt,
+        parameters: {
+          negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy"
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${HF_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
       }
-    });
+    );
     
-    return imageBlob;
+    // Wavespeed API returns async job - need to poll for results
+    const responseData = response.data;
+    
+    // Check if it's the async job format: { code: 200, message: "success", data: { status: "created", urls: { get: "..." } } }
+    if (responseData && responseData.data && responseData.data.id) {
+      const jobId = responseData.data.id;
+      console.log(`Job created with ID: ${jobId}, polling for results...`);
+      
+      // Use router endpoint for polling (not the direct wavespeed API)
+      const pollUrl = `https://router.huggingface.co/wavespeed/api/v3/predictions/${jobId}/result`;
+      
+      // Poll the result URL until job is complete
+      const maxAttempts = 60; // 60 attempts
+      const pollInterval = 2000; // 2 seconds between polls
+      
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        
+        try {
+          // Poll using router endpoint with HuggingFace token
+          const resultResponse = await axios.get(pollUrl, {
+            headers: {
+              'Authorization': `Bearer ${HF_API_KEY}`
+            }
+          });
+          
+          const resultData = resultResponse.data;
+          // Response format: { code: 200, message: "success", data: { status: "...", outputs: [...] } }
+          const status = resultData.data?.status || resultData.status;
+          
+          console.log(`Poll attempt ${attempt + 1}/${maxAttempts}, status: ${status}`);
+          
+          if (status === 'completed' || status === 'succeeded') {
+            // Job completed, extract image from outputs array
+            const outputs = resultData.data?.outputs || resultData.outputs || [];
+            
+            if (outputs.length > 0) {
+              // Get the first output image URL
+              const imageUrl = outputs[0];
+              
+              if (typeof imageUrl === 'string' && imageUrl.startsWith('http')) {
+                // Fetch image from URL (e.g., CloudFront URL)
+                console.log(`Fetching generated image from: ${imageUrl}`);
+                const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+                return Buffer.from(imageResponse.data);
+              } else if (typeof imageUrl === 'string' && imageUrl.startsWith('data:')) {
+                // Base64 data URI
+                const base64Data = imageUrl.split(',')[1];
+                return Buffer.from(base64Data, 'base64');
+              } else {
+                throw new Error(`Unexpected image format in outputs: ${typeof imageUrl}`);
+              }
+            }
+            
+            throw new Error('Job completed but outputs array is empty');
+          } else if (status === 'failed' || status === 'error') {
+            const errorMsg = resultData.data?.error || resultData.error || 'Job failed';
+            throw new Error(`Image generation job failed: ${errorMsg}`);
+          }
+          // If status is still 'created' or 'processing', continue polling
+        } catch (pollError) {
+          // Handle various error cases
+          if (pollError.response) {
+            const status = pollError.response.status;
+            // 404 or 401 might mean job is still processing or not ready
+            if (status === 404 || status === 401) {
+              console.log(`Result not ready yet (${status}), continuing to poll...`);
+              continue;
+            }
+            // Log other errors but continue polling (might be temporary)
+            if (status >= 500) {
+              console.log(`Server error (${status}), retrying...`);
+              continue;
+            }
+          }
+          // If it's not a retryable error, throw it
+          throw pollError;
+        }
+      }
+      
+      throw new Error('Image generation timed out - job did not complete within expected time');
+    }
+    
+    // If response is not async job format, try to extract image directly
+    if (responseData && responseData.data && typeof responseData.data === 'object') {
+      const data = responseData.data;
+      
+      // Check for outputs array
+      if (data.outputs && Array.isArray(data.outputs) && data.outputs[0]) {
+        const imageData = data.outputs[0];
+        if (typeof imageData === 'string') {
+          if (imageData.startsWith('data:')) {
+            const base64Data = imageData.split(',')[1];
+            return Buffer.from(base64Data, 'base64');
+          } else if (imageData.startsWith('http')) {
+            const imageResponse = await axios.get(imageData, { responseType: 'arraybuffer' });
+            return Buffer.from(imageResponse.data);
+          }
+        }
+      }
+    }
+    
+    // Fallback: try to parse as direct image response
+    if (Buffer.isBuffer(response.data)) {
+      return response.data;
+    }
+    
+    throw new Error(`Unexpected response format. Response structure: ${JSON.stringify(responseData, null, 2).substring(0, 500)}`);
   } catch (error) {
-    console.error('Error in generateImageViaRouter:', error.message);
-    
-    // If the client still uses deprecated endpoint, try direct router call
-    if (error.message && error.message.includes('no longer supported')) {
-      console.log('Client using deprecated endpoint, trying direct router call with fal-ai provider...');
-      return await generateImageViaDirectRouter(prompt);
+    // Log full error details for debugging
+    if (error.response) {
+      const errorData = typeof error.response.data === 'object' 
+        ? error.response.data 
+        : (error.response.data ? JSON.parse(error.response.data.toString()) : {});
+      console.error('Full error response:', {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: errorData,
+        headers: error.response.headers
+      });
+      
+      // Extract meaningful error message
+      const errorMsg = errorData.error || errorData.message || errorData.detail || error.message;
+      throw new Error(`ImageToImage failed (${error.response.status}): ${errorMsg}`);
     }
     
-    // If fal-ai provider fails, the model might not be available
-    if (error.message && error.message.includes('not available')) {
-      throw new Error('FLUX.1-dev model not available. Please check your API key has access to fal-ai provider or use Inference Endpoints.');
-    }
-    
+    console.error('Error in generateImageViaRouterImageToImage:', error.message);
     throw error;
   }
 }
 
 /**
- * Generate image using router endpoint directly with fal-ai provider
- * Fallback when HfInference client uses deprecated endpoint
+ * Generate image using wavespeed provider via router endpoint for textToImage
+ * Uses direct router endpoint for FLUX.2-dev text-to-image
  */
-async function generateImageViaDirectRouter(prompt) {
+async function generateImageViaRouterTextToImage(prompt) {
   try {
-    // Use router endpoint with provider in request body
-    // According to fal-ai docs, provider should be specified in the request
-    const response = await axios.post(
-      `https://router.huggingface.co/models/black-forest-labs/FLUX.1-dev`,
-      {
-        inputs: prompt,
-        parameters: {
-          negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy",
-          guidance_scale: 7.5,
-          num_inference_steps: 30
-        },
-        provider: "fal-ai"  // Specify provider in request body
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${HF_API_KEY}`,
-          'Content-Type': 'application/json',
-          'X-Provider': 'fal-ai'  // Also try as header
-        },
-        responseType: 'arraybuffer'
-      }
-    );
+    console.log('Using wavespeed router endpoint for textToImage (FLUX.2-dev)...');
     
-    // Return as Blob-like object
-    return {
-      arrayBuffer: async () => response.data
-    };
-  } catch (error) {
-    console.error('Error in generateImageViaDirectRouter:', error.response?.status, error.response?.data?.toString() || error.message);
-    
-    // Try alternative format with provider in URL query param
+    // Use wavespeed endpoint for text-to-image
+    // Note: "product not found" error suggests this endpoint might not support text-to-image
+    // Try without /edit suffix, or use a different endpoint
+    let response;
     try {
-      console.log('Trying alternative router format with provider in URL...');
-      const response2 = await axios.post(
-        `https://router.huggingface.co/models/black-forest-labs/FLUX.1-dev?provider=fal-ai`,
+      // First try: standard endpoint without /edit
+      response = await axios.post(
+        'https://router.huggingface.co/wavespeed/api/v3/wavespeed-ai/flux-2-dev',
         {
-          inputs: prompt,
+          prompt: prompt,
           parameters: {
             negative_prompt: "blurry, distorted, low quality, duplicate, watermark, text overlay, ugly, bad anatomy",
             guidance_scale: 7.5,
@@ -355,17 +402,70 @@ async function generateImageViaDirectRouter(prompt) {
           headers: {
             'Authorization': `Bearer ${HF_API_KEY}`,
             'Content-Type': 'application/json'
-          },
-          responseType: 'arraybuffer'
+          }
         }
       );
-      
-      return {
-        arrayBuffer: async () => response2.data
-      };
-    } catch (error2) {
-      throw new Error(`Router endpoint failed: ${error2.response?.status} - ${error2.response?.data?.toString() || error2.message}`);
+    } catch (firstError) {
+      // If that fails, try with /generate or different path
+      console.log('Standard textToImage endpoint failed, trying alternative...');
+      throw new Error('Text-to-image may not be available for wavespeed flux-2-dev. Consider using imageToImage with a blank/white image instead.');
     }
+    
+    // Response might be JSON with image data or direct image bytes
+    if (Buffer.isBuffer(response.data)) {
+      return response.data;
+    } else if (typeof response.data === 'string') {
+      // If it's a base64 string
+      if (response.data.startsWith('data:')) {
+        const base64Data = response.data.split(',')[1];
+        return Buffer.from(base64Data, 'base64');
+      }
+      return Buffer.from(response.data, 'base64');
+    } else if (response.data && response.data.image) {
+      // If response is JSON with image field (base64 or URL)
+      const imageData = response.data.image;
+      if (imageData.startsWith('data:')) {
+        const base64Data = imageData.split(',')[1];
+        return Buffer.from(base64Data, 'base64');
+      } else if (imageData.startsWith('http')) {
+        // If it's a URL, fetch it
+        const imageResponse = await axios.get(imageData, { responseType: 'arraybuffer' });
+        return Buffer.from(imageResponse.data);
+      }
+      return Buffer.from(imageData, 'base64');
+    } else {
+      // Try to parse as JSON and look for common image fields
+      const jsonData = typeof response.data === 'object' ? response.data : JSON.parse(response.data);
+      if (jsonData.images && jsonData.images[0]) {
+        const imageData = jsonData.images[0];
+        if (imageData.startsWith('data:')) {
+          const base64Data = imageData.split(',')[1];
+          return Buffer.from(base64Data, 'base64');
+        }
+        return Buffer.from(imageData, 'base64');
+      }
+      throw new Error('Unexpected response format from textToImage endpoint');
+    }
+  } catch (error) {
+    // Log full error details for debugging
+    if (error.response) {
+      const errorData = typeof error.response.data === 'object' 
+        ? error.response.data 
+        : (error.response.data ? JSON.parse(error.response.data.toString()) : {});
+      console.error('Full error response:', {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: errorData,
+        headers: error.response.headers
+      });
+      
+      // Extract meaningful error message
+      const errorMsg = errorData.error || errorData.message || errorData.detail || error.message;
+      throw new Error(`TextToImage failed (${error.response.status}): ${errorMsg}`);
+    }
+    
+    console.error('Error in generateImageViaRouterTextToImage:', error.message);
+    throw error;
   }
 }
 
