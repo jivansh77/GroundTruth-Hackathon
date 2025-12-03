@@ -22,7 +22,7 @@ Businesses and marketing teams spend **weeks** designing variations of the same 
 - High costs ($5,000-$15,000+)
 - Delayed campaign timelines
 
-Our solution automates this entire process, generating professional ad creatives in minutes instead of weeks.
+My solution automates this entire process, generating professional ad creatives in minutes instead of weeks.
 
 ---
 
