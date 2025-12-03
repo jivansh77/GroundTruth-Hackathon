@@ -1,3 +1,5 @@
+### NOTE - I RAN OUT OF CREDITS WHEN GENERATING THE TEXT FOR CAPTIONS 5-10, which is why it went to fallback
+
 # Technical Implementation Notes
 
 ## Vision Model: Gemini 2.0 Flash
